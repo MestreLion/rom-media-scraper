@@ -1,0 +1,56 @@
+# -----------------------------------------------------------------------------
+# Metadata
+# https://packaging.python.org/en/latest/specifications/declaring-project-metadata/
+[project]
+name = "rom-media-scraper"
+authors = [
+    {name="Rodrigo Silva (MestreLion)", email="linux@rodrigosilva.com"},
+]
+description = "CLI and Library to fetch ROM info and media from online databases"
+license =  {text = "GPL-3.0-or-later"}  # Free text, using SPDX for now. See PEP 639
+urls."Homepage" = "https://github.com/MestreLion/rom-media-scraper"
+urls."Source Code" = "https://github.com/MestreLion/rom-media-scraper"
+urls."Issue Tracker" = "https://github.com/MestreLion/rom-media-scraper/issues"
+readme = "README.md"
+keywords = ["scraper", "rom", "retro", "game", "media", "artwork"]
+classifiers = [
+    # https://pypi.org/classifiers/
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Topic :: Games/Entertainment",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+dynamic = ["version"]
+
+# -----------------------------------------------------------------------------
+# Requirements
+requires-python = ">=3.11"  # tomllib
+dependencies = [
+    "requests",
+]
+# -----------------------------------------------------------------------------
+# Entry points
+[project.scripts]
+rom-media-scraper = "scraper:run"
+
+# -----------------------------------------------------------------------------
+# Building
+# https://setuptools.pypa.io/en/latest/userguide/pyproject_config.html
+[build-system]
+requires = ["setuptools >= 61.0"]  # Supports pyproject.toml configuration
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "scraper.__version__"}

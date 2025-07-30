@@ -1,0 +1,13 @@
+[ScreenScraper]
+# Developer credentials
+dev_id = "xxx"
+dev_password = "yyy"
+
+# Software (Friendly) Name
+software = "zzz"
+
+# User ID (Login name)
+username = "test"
+
+# User Password
+password = "test"
