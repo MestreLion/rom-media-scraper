@@ -29,6 +29,7 @@ import sys
 import tomllib
 
 import requests
+import xxhash
 
 
 __version__ = "0.1"
@@ -41,6 +42,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = argparse.Namespace(
         loglevel=logging.DEBUG,
         config=pathlib.Path(__file__).with_name("config.toml"),
+        path=pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "."),
+        cachedir=pathlib.Path(__file__).with_name("cache")
     )
     args.debug = (args.loglevel == logging.DEBUG)
     logging.basicConfig(
@@ -52,9 +55,71 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def read_config(path:os.PathLike) -> dict:
-    with open(path, "rb") as f:
-        data = tomllib.load(f)
-    return data
+    return tomllib.loads(pathlib.Path(path).read_text())
+
+
+def pretty(obj: object, indent=2, sort_keys=False) -> str:
+    return json.dumps(obj, separators=(',', ':'), default=str, sort_keys=sort_keys, indent=indent)
+
+
+def hashobj(obj: object) -> str:
+    return xxhash.xxh3_128_hexdigest(pretty(obj, indent=1, sort_keys=True))
+
+
+class CachedResource:
+    TEXT_TYPES = {"json", "xml", "txt", "html"}
+
+    def __init__(
+        self,
+        provider:str,
+        endpoint:str,
+        params:dict,
+        filetype: str = "",
+        rootdir: os.PathLike | None = None
+    ):
+        self.stem = pathlib.Path(hashobj((provider, endpoint, params)))
+        self.type = filetype.lstrip(".").lower()
+        self.root = None if rootdir is None else pathlib.Path(rootdir)
+
+    @property
+    def relpath(self) -> pathlib.Path:
+        return self.stem.with_suffix(f".{self.type}") if self.type else self.stem
+
+    @property
+    def path(self) -> pathlib.Path | None:
+        if self.root is None:
+            return None
+        return self.root / self.relpath
+
+    @property
+    def is_text(self) -> bool:
+        return self.type in self.TEXT_TYPES
+
+    @property
+    def is_json(self) -> bool:
+        return self.type == "json"
+
+    def read(self) -> object | None:
+        if (path := self.path) is None:
+            return None
+        try:
+            data = path.read_text() if self.is_text else path.read_bytes()
+        except FileNotFoundError:
+            return None
+        log.debug("Data retrieved from cache: %s", path)
+        return json.loads(data) if self.is_json else data
+
+    def write(self, data:object) -> None:
+        if (path := self.path) is None:
+            return
+        log.debug("Write data to cache: %s", path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if self.is_json:
+            path.write_text(pretty(data))
+        elif self.is_text:
+            path.write_text(data)
+        else:
+            path.write_bytes(data)
 
 
 class ScreenScraper:
@@ -71,27 +136,46 @@ class ScreenScraper:
         dev_id: str = API_DEVELOPER,
         dev_password:str = API_PASSWORD,
         software: str = API_SOFTWARE,
+        cachedir: os.PathLike | None = None,
     ):
         self.dev_id = dev_id
         self.dev_password = dev_password
         self.software = software
         self.username = username
         self.password = password
+        self.cachedir: pathlib.Path | None = None if cachedir is None else pathlib.Path(cachedir)
 
-    def call(self, endpoint, *, json=True, **params):
+    def get_cached_resource(self, endpoint:str, params:dict, filetype=""):
+        return CachedResource(
+            provider=self.__class__.__name__,
+            endpoint=endpoint,
+            params=params,
+            filetype=filetype,
+            rootdir=self.cachedir,
+        )
+
+    def call(self, endpoint, **params) -> dict:
+        # Try cached data
+        cache = self.get_cached_resource(endpoint, params, "json")
+        if (data := cache.read()) is not None:
+            return data
+        # Fetch data
         url = "/".join((self.API_URL, endpoint))
         data = {
             "devid": self.dev_id,
-            "devpassword": self.dev_password,
+            "devpassword": self.dev_password,  # not required
             "softname": self.software,
             "ssid": self.username,
             "sspassword": self.password,
-            "output": "JSON" if json else "XML",
+            "output": "json",  # default: "xml"
         }
         data.update(params)
-        return requests.get(url, params=data)
+        out = requests.get(url, params=data).json()
+        # Write to cache
+        cache.write(out)
+        return out
 
-    def game_info(self, system_id:int, name:str, crc:str):
+    def game_info(self, system_id:int, name:str, crc:str) -> dict:
         params = {
             "systemeid": system_id,
             "crc": crc,
@@ -106,10 +190,9 @@ def cli(argv:list[str] | None = None) -> None:
     """Command-line argument handling and logging setup"""
     args = parse_args(argv)
     config = read_config(args.config)
-    api = ScreenScraper(**config["ScreenScraper"])
-    res = api.game_info(1, "Sonic The Hedgehog 2 (World).zip", "50ABC90A")
-    print(res.url)
-    print(res.text)
+    api = ScreenScraper(**config["ScreenScraper"], cachedir=args.cachedir)
+    data = api.game_info(1, "Sonic The Hedgehog 2 (World).zip", "50ABC90A")
+    print(pretty(data))
 
 
 def run(argv: list[str] | None = None) -> None:

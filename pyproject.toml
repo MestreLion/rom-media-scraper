@@ -39,6 +39,7 @@ dynamic = ["version"]
 requires-python = ">=3.11"  # tomllib
 dependencies = [
     "requests",
+    "xxhash >= 2.0",  # xxh3
 ]
 # -----------------------------------------------------------------------------
 # Entry points
