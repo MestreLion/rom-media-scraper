@@ -27,6 +27,7 @@ import os
 import pathlib
 import sys
 import tomllib
+import zlib
 
 import requests
 import xxhash
@@ -120,6 +121,35 @@ class CachedResource:
             path.write_text(data)
         else:
             path.write_bytes(data)
+
+
+class Rom:
+    CHUNK_SIZE = 64 * 2**10
+
+    def __init__(self, path:os.PathLike):
+        self.path = pathlib.Path(path)
+        self._crc32 = ""
+
+    @property
+    def name(self) -> str:
+        return self.path.stem
+
+    @property
+    def size(self) -> int:
+        return self.path.stat().st_size
+
+    @property
+    def crc32(self) -> str:
+        if not self._crc32:
+            crc = 0
+            with self.path.open(mode="rb") as fd:
+                while chunk := fd.read(self.CHUNK_SIZE):
+                    crc = zlib.crc32(chunk, crc)
+            self._crc32 = f"{crc & 0xFFFFFFFF:08X}"
+        return self._crc32
+
+    def __repr__(self) -> str:
+        return f"<ROM {str(self.path)!r}, {self.size} bytes, CRC32={self.crc32!r}>"
 
 
 class ScreenScraper:
