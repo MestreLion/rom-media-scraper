@@ -238,10 +238,16 @@ class ScreenScraper:
             res = requests.get(url, params=data, timeout=self.TIMEOUT)
             res.raise_for_status()
             out = res.json()
+        except requests.exceptions.ReadTimeout as e:
+            raise ScraperError("%s", e, err=e)
         except requests.exceptions.JSONDecodeError as e:
-            raise ScraperError("Malformed JSON: %s from url: %s\n%r", e, res.url, res.text)
+            raise ScraperError("Malformed JSON: %s from url: %s\n%r", e, res.url, res.text, err=e)
         except requests.exceptions.RequestException as e:
             # requests error message already contains URL
+            if res.status_code in { 403 }:  # Forbidden
+                msg = res.text.strip()
+                if "identifiants développeur" in msg:  # "Erreur de login : Vérifier vos identifiants développeur !  "
+                    raise ScraperError("%s\t%s (Invalid developer credentials)", e, msg, errno=403, err=e)
             raise ScraperError("%s\n%s\n%s", e, pretty(dict(res.headers)), res.text, errno=res.status_code, err=e)
         # Write to cache
         cache.write(out)
@@ -268,7 +274,7 @@ class ScreenScraper:
         try:
             info = self.api_game_info(system["id"], rom.name, rom.size, rom.crc32)
         except ScraperError as e:
-            if e.errno in { 404 }:
+            if e.errno in { 404 }:  # Not Found
                 msg = e.err.response.text.strip()
                 pretty_system = (system["id"], system["noms"]["nom_eu"])
                 if "non trouvée" in msg:  # "Erreur : Rom/Iso/Dossier non trouvée !  "
