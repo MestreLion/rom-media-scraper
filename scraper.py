@@ -37,6 +37,7 @@ __version__ = "0.1"
 __title__ = "Rom Media Scraper"
 
 TIMEOUT = 10
+LAYOUT = "batocera"
 
 log: logging.Logger = logging.getLogger(__name__)
 
@@ -259,14 +260,39 @@ class ScreenScraper:
         }
         return self.api_call("jeuInfos.php", **params)["jeu"]
 
+    def identify_rom_system(self, rom, layout=LAYOUT) -> dict:
+        return {"id": 14, "noms": {"nom_eu": "Nintendo 64"}}
+
+    def find_game(self, rom: Rom, layout=LAYOUT) -> dict:
+        system = self.identify_rom_system(rom, layout=layout)
+        try:
+            info = self.api_game_info(system["id"], rom.name, rom.size, rom.crc32)
+        except ScraperError as e:
+            if e.errno in { 404 }:
+                msg = e.err.response.text.strip()
+                pretty_system = (system["id"], system["noms"]["nom_eu"])
+                if "non trouvée" in msg:  # "Erreur : Rom/Iso/Dossier non trouvée !  "
+                    raise ScraperError(
+                        "%r for system %r not found in %s database.",
+                        rom, system["noms"]["nom_eu"], self.source, err=e.err
+                    )
+            raise
+        print(pretty(info))
+
+    def download_rom_media(self, rom: Rom, path: os.PathLike, media_type="ss", language="us", region="wor", layout=LAYOUT):
+        game = self.find_game(rom, layout=layout)
+        ...
+
 
 def cli(argv:list[str] | None = None) -> None:
     """Command-line argument handling and logging setup"""
     args = parse_args(argv)
     config = read_config(args.config)
     api = ScreenScraper(**config["ScreenScraper"], cachedir=args.cachedir)
-    data = api.game_info(1, "Sonic The Hedgehog 2 (World).zip", "50ABC90A")
-    print(pretty(data))
+
+    if args.path.is_file():
+        rom = Rom(args.path)
+        api.download_rom_media(rom, ".")
 
 
 def run(argv: list[str] | None = None) -> None:
