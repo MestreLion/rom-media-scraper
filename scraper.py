@@ -36,7 +36,7 @@ import xxhash
 __version__ = "0.1"
 __title__ = "Rom Media Scraper"
 
-TIMEOUT = 10
+TIMEOUT = 20
 LAYOUT = "batocera"
 
 log: logging.Logger = logging.getLogger(__name__)
@@ -183,7 +183,7 @@ class ScreenScraper:
     API_URL = "https://api.screenscraper.fr/api2"
     API_DEVELOPER = "xxx"
     API_PASSWORD = "yyy"
-    API_SOFTWARE = "zzz"
+    API_SOFTWARE = f"{__title__} v{__version__}"
     TIMEOUT: int | None = TIMEOUT
 
     def __init__(
@@ -227,7 +227,7 @@ class ScreenScraper:
         url = "/".join((self.API_URL, endpoint))
         data = {
             "devid": self.dev_id,
-            "devpassword": self.dev_password,  # not required
+            "devpassword": self.dev_password,
             "softname": self.software,
             "ssid": self.username,
             "sspassword": self.password,
