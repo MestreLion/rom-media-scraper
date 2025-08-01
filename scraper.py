@@ -36,6 +36,8 @@ import xxhash
 __version__ = "0.1"
 __title__ = "Rom Media Scraper"
 
+TIMEOUT = 10
+
 log: logging.Logger = logging.getLogger(__name__)
 
 
@@ -49,7 +51,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args.debug = (args.loglevel == logging.DEBUG)
     logging.basicConfig(
         level=args.loglevel,
-        format="[%(asctime)s %(levelname)-6.6s] %(module)-4s: %(message)s",
+        format="[%(asctime)s %(levelname)-5s] %(module)-4s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     return args
@@ -67,30 +69,53 @@ def hashobj(obj: object) -> str:
     return xxhash.xxh3_128_hexdigest(pretty(obj, indent=1, sort_keys=True))
 
 
+class ScraperError(Exception):
+    """Base class for custom exceptions with a few extras on top of Exception.
+
+    - %-formatting for args, similar to logging.log()
+    - `errno` numeric attribute, similar to OSError
+    - `err` attribute for the original exception, useful when re-raising exceptions
+
+    All modules in this package raise this (or a subclass) for all explicitly
+    raised, business-logic, expected or handled exceptions.
+    """
+
+    def __init__(
+        self,
+        msg: object = "",
+        *args: object,
+        errno: int = 0,
+        err:Exception | None = None
+    ):
+        super().__init__((str(msg) % args) if args else msg)
+        self.errno: int = errno
+        self.err: Exception | None = err
+
+
 class CachedResource:
     TEXT_TYPES = {"json", "xml", "txt", "html"}
 
     def __init__(
         self,
-        provider:str,
-        endpoint:str,
-        params:dict,
+        origin:str,
+        name:str,
+        params:dict | None = None,
         filetype: str = "",
         rootdir: os.PathLike | None = None
     ):
-        self.stem = pathlib.Path(hashobj((provider, endpoint, params)))
+        self.stem = pathlib.Path(hashobj((origin, name, params)))
         self.type = filetype.lstrip(".").lower()
         self.root = None if rootdir is None else pathlib.Path(rootdir)
 
     @property
-    def relpath(self) -> pathlib.Path:
+    def name(self) -> pathlib.Path:
         return self.stem.with_suffix(f".{self.type}") if self.type else self.stem
 
     @property
     def path(self) -> pathlib.Path | None:
         if self.root is None:
             return None
-        return self.root / self.relpath
+        return self.root / self.name
 
     @property
     def is_text(self) -> bool:
@@ -158,6 +183,7 @@ class ScreenScraper:
     API_DEVELOPER = "xxx"
     API_PASSWORD = "yyy"
     API_SOFTWARE = "zzz"
+    TIMEOUT: int | None = TIMEOUT
 
     def __init__(
         self,
@@ -175,20 +201,27 @@ class ScreenScraper:
         self.password = password
         self.cachedir: pathlib.Path | None = None if cachedir is None else pathlib.Path(cachedir)
 
+    @property
+    def source(self) -> str:
+        return self.__class__.__name__
+
+    def __str__(self):
+        return self.source
+
     def get_cached_resource(self, endpoint:str, params:dict, filetype=""):
         return CachedResource(
-            provider=self.__class__.__name__,
-            endpoint=endpoint,
+            origin=self.source,
+            name=endpoint,
             params=params,
             filetype=filetype,
             rootdir=self.cachedir,
         )
 
-    def call(self, endpoint, **params) -> dict:
+    def api_call(self, endpoint:str, **params) -> dict:
         # Try cached data
         cache = self.get_cached_resource(endpoint, params, "json")
         if (data := cache.read()) is not None:
-            return data
+            return data["response"]
         # Fetch data
         url = "/".join((self.API_URL, endpoint))
         data = {
@@ -200,20 +233,31 @@ class ScreenScraper:
             "output": "json",  # default: "xml"
         }
         data.update(params)
-        out = requests.get(url, params=data).json()
+        try:
+            res = requests.get(url, params=data, timeout=self.TIMEOUT)
+            res.raise_for_status()
+            out = res.json()
+        except requests.exceptions.JSONDecodeError as e:
+            raise ScraperError("Malformed JSON: %s from url: %s\n%r", e, res.url, res.text)
+        except requests.exceptions.RequestException as e:
+            # requests error message already contains URL
+            raise ScraperError("%s\n%s\n%s", e, pretty(dict(res.headers)), res.text, errno=res.status_code, err=e)
         # Write to cache
         cache.write(out)
-        return out
+        return out["response"]
 
-    def game_info(self, system_id:int, name:str, crc:str) -> dict:
+    def api_systems_list(self) -> list[dict]:
+        return self.api_call("systemesListe.php")["systemes"]
+
+    def api_game_info(self, system_id:int, rom_name:str, rom_size:int, crc:str, rom_type="rom") -> dict:
         params = {
             "systemeid": system_id,
             "crc": crc,
-            "romnom": name,
-            "romtype": "rom",
-            "romtaille": 749652,
+            "romnom": rom_name,
+            "romtype": rom_type,
+            "romtaille": rom_size,
         }
-        return self.call("jeuInfos.php", **params)
+        return self.api_call("jeuInfos.php", **params)["jeu"]
 
 
 def cli(argv:list[str] | None = None) -> None:
@@ -228,10 +272,13 @@ def cli(argv:list[str] | None = None) -> None:
 def run(argv: list[str] | None = None) -> None:
     """CLI entry point, handling exceptions from cli() and setting exit code"""
     try:
-        cli(argv)
+        sys.exit(cli(argv))
+    except ScraperError as err:
+        log.error(err)
+        sys.exit(1)
     except Exception as err:
         log.exception(err)
-        sys.exit(1)
+        sys.exit(3)
     except KeyboardInterrupt:
         log.info("Aborting")
         sys.exit(2)
