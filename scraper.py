@@ -19,6 +19,13 @@ CLI and Library to fetch ROM info and media from online databases
 # https://github.com/zayamatias/sscraper
 # https://github.com/zayamatias/retroscraper
 
+# Nomenclature conventions:
+# - ROM: file or folder containing the original data of a game, regardless of digital format or game physical media type
+# - System (Platform): A video game system, console, computer, handheld: Nintendo 64, MSX1, Game Boy, Arcade
+# - Provider (Source): Online database of metadata and media for Games, ROMs, Systems: ScreenScraper, TheGamesDB
+# - Frontend: Device, OS or Software to play emulated games using ROMs: ES-DS, Batocera, Recalbox, RetroPie, Anbernic, Garlic
+# - Origin: Origin of a given data, can be either a Frontend or a Provider
+
 from __future__ import annotations
 
 import argparse
@@ -186,6 +193,21 @@ class ScreenScraper:
     API_PASSWORD = "yyy"
     API_SOFTWARE = f"{__title__} v{__version__}"
     TIMEOUT: int | None = TIMEOUT
+    ISO_TYPES: set[str] = {".iso", ".chd"}
+    MEDIA_TYPES: set[str] = {  # TODO: use a (named)2-tuple, namespace or class to hold description (and name)
+        "ss",               # In-game screenshot of typical gameplay
+        "sstitle",          # In-game screenshot of the game title screen
+        "wheel",            # Game title logo, commonly featured in title screen or game box
+        "box-2D",           # Front of the game (physical) box
+        "box-2D-side",      # Side (spine) of the box
+        "box-2D-back",      # Back of the box
+        "box-3D",           # Game box in 3D perspective, generated from box front and spine
+        "support-2D",       # Game physical media (Cartridge/CD/DVD/etc), likely generated from sticker and its system "blank" media
+        "support-texture",  # Game "sticker" featured in its physical media
+        "mixrbv1",          # Composite of gameplay screenshot, 3D box and logo (Mix Recalbox V1)
+        "mixrbv2",          # Composite of gameplay screenshot, 3D box, logo and physical media (Mix Recalbox V2)
+        "manuel",           # Game manual
+    }
 
     def __init__(
         self,
@@ -254,8 +276,15 @@ class ScreenScraper:
         cache.write(out)
         return out["response"]
 
+    # Low-level methods --------------------------------------------------
+
     def api_systems_list(self) -> list[dict]:
+        """List of systems with their info and media"""
         return self.api_call("systemesListe.php")["systemes"]
+
+    def api_medias_game_list(self) -> list[dict]:
+        """List of media for game (media types for games)"""
+        return self.api_call("mediasJeuListe.php")["medias"]
 
     def api_game_info(self, system_id:int, rom_name:str, rom_size:int, crc:str, rom_type="rom") -> dict:
         params = {
@@ -284,9 +313,21 @@ class ScreenScraper:
                         rom, system["noms"]["nom_eu"], self.source, err=e.err
                     )
             raise
-        print(pretty(info))
+        return info
 
-    def download_rom_media(self, rom: Rom, path: os.PathLike, media_type="ss", language="us", region="wor", layout=LAYOUT):
+    def download_file(self, url, path):
+        # Try cached data
+        # cache = self.get_cached_resource(endpoint, params, "json")
+        log.info("%3s: %s", path)
+
+    def download_rom_media(self, rom: Rom, path: os.PathLike, media_type="mixrbv2", system:dict) -> bool:
+        # Anbernic: 282 x 216 mixrbv2
+        # https://neoclone.screenscraper.fr/api2/mediaJeu.php?systemeid=4&jeuid=2138&media=mixrbv2(us)
+        # Web, non-API: (will keep original aspect ratio)
+        # https://www.screenscraper.fr/image.php?plateformid=4&gameid=2138&media=mixrbv2&hd=0&region=us&num=&version=&maxwidth=282&maxheight=216
+        # https://www.screenscraper.fr/image.php?plateformid=4&gameid=2138&media=mixrbv2&hd=0&region=us&num=&version=&maxwidth=282&maxheight=216
+        # https://www.screenscraper.fr/image.php?plateformid=4&gameid=2138&media=mixrbv2&region=us&maxwidth=320&maxheight=240
+        # tiny-scraper: 320, 240
         game = self.find_game(rom, layout=layout)
         ...
 
@@ -295,11 +336,11 @@ def cli(argv:list[str] | None = None) -> None:
     """Command-line argument handling and logging setup"""
     args = parse_args(argv)
     config = read_config(args.config)
-    api = ScreenScraper(**config["ScreenScraper"], cachedir=args.cachedir)
+    api = ScreenScraper(**config["ScreenScraper"], cachedir=args.cache_dir)
 
-    if args.path.is_file():
-        rom = Rom(args.path)
-        api.download_rom_media(rom, ".")
+    if args.paths:
+        api.download_media(args.paths)
+        return
 
 
 def run(argv: list[str] | None = None) -> None:
