@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # This file is part of Rom Media Scraper, see <https://github.com/MestreLion/rom-media-scraper>
 # Copyright (C) 2025 Rodrigo Silva (MestreLion) <linux@rodrigosilva.com>
 # License: GPLv3 or later, at your choice. See <http://www.gnu.org/licenses/gpl>
