@@ -47,16 +47,42 @@ __title__ = "Rom Media Scraper"
 TIMEOUT = 20
 LAYOUT = "batocera"
 
+CONFIG_PATH = pathlib.Path(__file__).with_name("config.toml")  # TODO: use platformdirs
+CACHE_DIR = pathlib.Path(__file__).with_name("cache")  # TODO: use platformdirs
+
 log: logging.Logger = logging.getLogger(__name__)
 
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    args = argparse.Namespace(
-        loglevel=logging.DEBUG,
-        config=pathlib.Path(__file__).with_name("config.toml"),
-        path=pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "."),
-        cachedir=pathlib.Path(__file__).with_name("cache")
+    epilog = """
+    Copyright (C) 2025 Rodrigo Silva (MestreLion) <linux@rodrigosilva.com>
+    License: GPLv3 or later, at your choice. See <http://www.gnu.org/licenses/gpl>
+    """.strip()
+    parser = argparse.ArgumentParser(description=__doc__, epilog=epilog.strip())
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "-q",
+        "--quiet",
+        dest="loglevel",
+        const=logging.WARNING,
+        default=logging.INFO,
+        action="store_const",
+        help="Suppress informative messages.",
     )
+    group.add_argument(
+        "-v",
+        "--verbose",
+        dest="loglevel",
+        const=logging.DEBUG,
+        action="store_const",
+        help="Verbose mode, output extra info.",
+    )
+    parser.add_argument("-C", "--config", default=CONFIG_PATH, type=pathlib.Path, help="Configuration file path" " [Default: %(default)s]")
+    parser.add_argument("-c", "--cache-dir", default=CACHE_DIR, type=pathlib.Path, help="Cache directory" " [Default: %(default)s]")
+#    group = parser.add_mutually_exclusive_group()
+#    group.add_argument("-m", "--list-media-types", default=False, action="store_true", help="List supported media types")
+    parser.add_argument(nargs="*", dest="paths", metavar="ROM_PATH", help="ROM files or folders")
+
+    args = parser.parse_args(argv)
     args.debug = (args.loglevel == logging.DEBUG)
     logging.basicConfig(
         level=args.loglevel,
