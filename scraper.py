@@ -29,16 +29,21 @@ CLI and Library to fetch ROM info and media from online databases
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import logging
 import os
 import pathlib
 import sys
-import tomllib
+import tomllib  # in stdlib since Python 3.11
+# import typing as t
 import zlib
 
 import requests
 import xxhash
+
+if (TYPE_CHECKING := False):
+    import collections.abc as abc
 
 
 __version__ = "0.1"
@@ -49,6 +54,11 @@ LAYOUT = "batocera"
 
 CONFIG_PATH = pathlib.Path(__file__).with_name("config.toml")  # TODO: use platformdirs
 CACHE_DIR = pathlib.Path(__file__).with_name("cache")  # TODO: use platformdirs
+
+type Json = str | int | float | bool | None | "JsonDict" | "JsonList"
+type JsonDict = dict[str, Json]
+type JsonList = list[Json]
+type JsonDictSet = dict[str, Json | set[str] | set[int]]  # set intentionally only as root value
 
 log: logging.Logger = logging.getLogger(__name__)
 
@@ -102,6 +112,34 @@ def pretty(obj: object, indent=2, sort_keys=False) -> str:
 
 def hashobj(obj: object) -> str:
     return xxhash.xxh3_128_hexdigest(pretty(obj, indent=1, sort_keys=True))
+
+
+def unique[T:abc.Hashable](iterable: abc.Iterable[T], discard_falsy:bool=True) -> abc.Iterator[T]:
+    """Yield unique elements, preserving order. Elements must be hashable"""
+    # AKA "Ordered Set" or "De-Duplicated List"
+    # Alternative: unique_everseen() from itertools recipes or more-itertools package
+    # (faster and allow un-hashable (i.e. mutable) elements)
+    # https://stackoverflow.com/a/17016257/624066
+    yield from dict.fromkeys(filter(None, iterable) if discard_falsy else iterable)
+
+
+def iter_files(paths:list[os.PathLike], yield_dirs=False) -> abc.Iterator[pathlib.Path]:
+    for item in paths:
+        path = pathlib.Path(item)
+        if path.is_file():
+            yield path
+        elif path.is_dir():
+            # TODO: handle symlink infinite loops
+            for dirpath, _, filenames in path.walk(follow_symlinks=True):
+                if yield_dirs and filenames:
+                    yield dirpath
+                for filename in sorted(filenames):
+                    yield dirpath / filename
+
+
+def csv2iter[T](text:str, sep=",", itemtype:type[T]=str) ->  abc.Iterator[T]:
+    """Split text by separator, yielding each stripped (and possibly converted) element"""
+    return (itemtype(_.strip()) for _ in (text.split(sep) if text else []))
 
 
 class ScraperError(Exception):
@@ -212,6 +250,30 @@ class Rom:
         return f"<ROM {str(self.path)!r}, {self.size} bytes, CRC32={self.crc32!r}>"
 
 
+class System:
+    """Video game system, console, computer, handheld. Also known as Platform"""
+    # For now, exclusive to ScreenScraper
+
+    def __init__(self, data:JsonDict):
+        self._data: JsonDict = data
+        self.id: int = int(data["id"])
+        self.name: str = data["noms"]["nom_eu"]  # the only "nom_*" surely present in all systems
+        self.suffixes: set[str] = set(f".{_}" for _ in csv2iter(data.get("extensions")))
+        self.manufacturer: str = data.get("compagnie", "")
+        self.paths: set[str] = set(
+            _.lower() for _ in
+            set(itertools.chain.from_iterable(csv2iter(_) for _ in data["noms"].values()))
+        )
+        self.names: tuple[str] = tuple(unique(data["noms"].get(f"nom_{_}") for _ in ("eu", "us", "jp")))
+
+    def __str__(self):
+        return f"{self.manufacturer} {self.name}"
+
+    def __repr__(self):
+        names = " / ".join(self.names).removeprefix(self.manufacturer).strip()
+        return f"<System {self.id:3d}: {self.manufacturer} {names}>"
+
+
 class ScreenScraper:
     """ScreenScraper API (https://screenscraper.fr)"""
     API_URL = "https://api.screenscraper.fr/api2"
@@ -234,6 +296,7 @@ class ScreenScraper:
         "mixrbv2",          # Composite of gameplay screenshot, 3D box, logo and physical media (Mix Recalbox V2)
         "manuel",           # Game manual
     }
+    type Systems = dict[int, System]
 
     def __init__(
         self,
@@ -250,10 +313,25 @@ class ScreenScraper:
         self.username = username
         self.password = password
         self.cachedir: pathlib.Path | None = None if cachedir is None else pathlib.Path(cachedir)
+        self._systems: Systems = {}
+        # self._systems: dict[str, System] = {}
 
     @property
     def source(self) -> str:
         return self.__class__.__name__
+
+    @property
+    def systems(self) -> Systems:
+        if self._systems:
+            return self._systems
+        for system in self.api_systems_list():
+            # FIXME: handle "x(a|b),y(c|d)" cases
+            system["names"] = set(itertools.chain.from_iterable(csv2iter(_) for _ in system["noms"].values()))
+            system["dirnames"] = set(_.lower() for _ in system["names"])
+            system["suffixes"] = set(f".{_}" for _ in csv2iter(system.get("extensions")))
+            self._systems[int(system["id"])] = system
+            log.debug("System %3d: %s, %s", system["id"], system["dirnames"], system["suffixes"])
+        return self._systems
 
     def __str__(self):
         return self.source
@@ -267,7 +345,7 @@ class ScreenScraper:
             rootdir=self.cachedir,
         )
 
-    def api_call(self, endpoint:str, **params) -> dict:
+    def api_call(self, endpoint:str, **params) -> JsonDict:
         # Try cached data
         cache = self.get_cached_resource(endpoint, params, "json")
         if (data := cache.read()) is not None:
@@ -304,15 +382,15 @@ class ScreenScraper:
 
     # Low-level methods --------------------------------------------------
 
-    def api_systems_list(self) -> list[dict]:
+    def api_systems_list(self) -> list[JsonDict]:
         """List of systems with their info and media"""
         return self.api_call("systemesListe.php")["systemes"]
 
-    def api_medias_game_list(self) -> list[dict]:
+    def api_medias_game_list(self) -> list[JsonDict]:
         """List of media for game (media types for games)"""
         return self.api_call("mediasJeuListe.php")["medias"]
 
-    def api_game_info(self, system_id:int, rom_name:str, rom_size:int, crc:str, rom_type="rom") -> dict:
+    def api_game_info(self, system_id:int, rom_name:str, rom_size:int, crc:str, rom_type="rom") -> JsonDict:
         params = {
             "systemeid": system_id,
             "crc": crc,
@@ -322,13 +400,30 @@ class ScreenScraper:
         }
         return self.api_call("jeuInfos.php", **params)["jeu"]
 
-    def identify_rom_system(self, rom, layout=LAYOUT) -> dict:
-        return {"id": 14, "noms": {"nom_eu": "Nintendo 64"}}
+    def api_game_search(self, system_id:int, search:str) -> list[JsonDict]:
+        """Search for a game by name, return limited to 30 games ranked by probability"""
+        params = {
+            "systemeid": system_id,
+            "recherche": search,
+        }
+        return self.api_call("jeuRecherche.php", **params)["jeux"]
 
-    def find_game(self, rom: Rom, layout=LAYOUT) -> dict:
-        system = self.identify_rom_system(rom, layout=layout)
+    # High-level methods --------------------------------------------------
+
+    def find_system_by_dir(self, path:os.PathLike) -> System | None:
+        # TODO: Make it recusive on parents, so it find systems for roms in subdirs
+        if (path := pathlib.Path(path)).is_file():
+            path = path.parent
+        dirname = path.name
+        for data in self.systems.values():
+            if dirname.lower() in data["dirnames"]:
+                return System(data)
+        return None
+        # raise ScraperError("System not found in %s database for directory: %s", self.source, dirname)
+
+    def find_game(self, system:System, rom:Rom) -> JsonDict:
         try:
-            info = self.api_game_info(system["id"], rom.name, rom.size, rom.crc32)
+            info = self.api_game_info(system.id, rom.name, rom.size, rom.crc32)
         except ScraperError as e:
             if e.errno in { 404 }:  # Not Found
                 msg = e.err.response.text.strip()
@@ -344,9 +439,9 @@ class ScreenScraper:
     def download_file(self, url, path):
         # Try cached data
         # cache = self.get_cached_resource(endpoint, params, "json")
-        log.info("%3s: %s", path)
+        log.info("Download file: %s", path)
 
-    def download_rom_media(self, rom: Rom, path: os.PathLike, media_type="mixrbv2", system:dict) -> bool:
+    def download_rom_media(self, system:System, rom:Rom, save_path:os.PathLike, media_type="mixrbv2") -> bool:
         # Anbernic: 282 x 216 mixrbv2
         # https://neoclone.screenscraper.fr/api2/mediaJeu.php?systemeid=4&jeuid=2138&media=mixrbv2(us)
         # Web, non-API: (will keep original aspect ratio)
@@ -354,8 +449,77 @@ class ScreenScraper:
         # https://www.screenscraper.fr/image.php?plateformid=4&gameid=2138&media=mixrbv2&hd=0&region=us&num=&version=&maxwidth=282&maxheight=216
         # https://www.screenscraper.fr/image.php?plateformid=4&gameid=2138&media=mixrbv2&region=us&maxwidth=320&maxheight=240
         # tiny-scraper: 320, 240
-        game = self.find_game(rom, layout=layout)
-        ...
+        log.info("%r", rom)
+        return True
+        game = self.find_game(system, rom)
+        rom_regions = game["rom"]["romregions"].split(",")
+        system_name = game["systeme"]["text"]
+        # "mediaJeu.php"
+        if not game["medias"]:
+            log.warning("No media for %s game %s", system_name, game["noms"][0]["text"])
+            return False
+        for media in game["medias"]:
+            if media["type"] == media_type and media["region"] in rom_regions:
+                log.info("%r", rom.path.with_suffix(f".{media['format']}").name)
+                # self.download_file(media["url"], pathlib.Path(path) / rom.path.with_suffix(f".{media['format']}").name)
+                return True
+        else:
+            log.warning("No %r %s media for %s game %s", media_type, rom_regions, system_name, game["noms"][0]["text"])
+            return False
+
+    def download_media(self, paths:abc.Iterable[os.PathLike], media_type="ss", save_path="."):
+        num_media = num_rom = 0
+        system: System | None = None
+        for path in iter_files(paths, yield_dirs=True):
+            if path.is_dir():
+                log.info("NEW DIR! %s", path)
+                if (system := self.find_system_by_dir(path)) is None:
+                    log.error("System not found in %s database for directory: %s", self.source, path)
+                continue
+            if system is None:
+                continue
+            if path.suffix not in system.suffixes:
+                log.warning("Ignoring non-ROM file for %r: %s", system, path)
+            num_rom += 1
+            try:
+                num_media += 1 if self.download_rom_media(system, Rom(path), save_path, media_type) else 0
+            except ScraperError as e:
+                log.error(e)
+                continue
+        log.info("%d / %d", num_media, num_rom)
+
+    def systems_statistics(self):
+        # 238 systems in ScreenScraper database
+        #   0 missing Europe name
+        # 227 missing USA name
+        # 229 missing Japan name
+        #  71 missing Recalbox name
+        #  96 missing Hyperspin name
+        #  84 missing Retropie name
+        #  49 missing Launchbox name
+        #  11 missing Extensions
+        # Names: {'eu', 'recalbox', 'retropie', 'jp', 'us', 'launchbox', 'hyperspin', 'noms_commun'}
+        systems = self.systems.values()
+        stats = (
+            (lambda _: _["noms"].get("nom_eu"), "Europe name"),
+            (lambda _: _["noms"].get("nom_us"), "USA name"),
+            (lambda _: _["noms"].get("nom_jp"), "Japan name"),
+            (lambda _: _["noms"].get("nom_recalbox"), "Recalbox name"),
+            (lambda _: _["noms"].get("nom_hyperspin"), "Hyperspin name"),
+            (lambda _: _["noms"].get("nom_retropie"), "Retropie name"),
+            (lambda _: _["noms"].get("nom_launchbox"), "Launchbox name"),
+            (lambda _: _["suffixes"], "Extensions"),
+        )
+        log.info("%3d systems in %s database", len(systems), self.source)
+        for criteria, label in stats:
+            i = 0
+            for system in systems:
+                if not criteria(system):
+                    i += 1
+                    log.debug("Missing %s: %3d - %s", label, system["id"], system["names"])
+            log.info("%3d missing %s", i, label)
+        noms = itertools.chain.from_iterable(_["noms"].keys() for _ in systems)
+        log.info("Names: %s", set(_.removeprefix("nom_") for _ in noms))
 
 
 def cli(argv:list[str] | None = None) -> None:
@@ -363,7 +527,7 @@ def cli(argv:list[str] | None = None) -> None:
     args = parse_args(argv)
     config = read_config(args.config)
     api = ScreenScraper(**config["ScreenScraper"], cachedir=args.cache_dir)
-
+    # api.systems_statistics()
     if args.paths:
         api.download_media(args.paths)
         return
