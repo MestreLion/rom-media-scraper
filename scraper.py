@@ -36,13 +36,13 @@ import os
 import pathlib
 import sys
 import tomllib  # in stdlib since Python 3.11
-# import typing as t
 import zlib
 
 import requests
 import xxhash
 
-if (TYPE_CHECKING := False):
+if TYPE_CHECKING := False:
+    # import typing as t
     import collections.abc as abc
 
 
@@ -65,7 +65,7 @@ log: logging.Logger = logging.getLogger(__name__)
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     epilog = """
     Copyright (C) 2025 Rodrigo Silva (MestreLion) <linux@rodrigosilva.com>
-    License: GPLv3 or later, at your choice. See <http://www.gnu.org/licenses/gpl>
+    License: GPLv3 or later, at your choice. See <https://www.gnu.org/licenses/gpl>
     """.strip()
     parser = argparse.ArgumentParser(description=__doc__, epilog=epilog.strip())
     group = parser.add_mutually_exclusive_group()
@@ -114,7 +114,7 @@ def hashobj(obj: object) -> str:
     return xxhash.xxh3_128_hexdigest(pretty(obj, indent=1, sort_keys=True))
 
 
-def unique[T:abc.Hashable](iterable: abc.Iterable[T], discard_falsy:bool=True) -> abc.Iterator[T]:
+def unique[T:"abc.Hashable"](iterable: abc.Iterable[T], discard_falsy:bool=True) -> abc.Iterator[T]:
     """Yield unique elements, preserving order. Elements must be hashable"""
     # AKA "Ordered Set" or "De-Duplicated List"
     # Alternative: unique_everseen() from itertools recipes or more-itertools package
@@ -123,7 +123,7 @@ def unique[T:abc.Hashable](iterable: abc.Iterable[T], discard_falsy:bool=True) -
     yield from dict.fromkeys(filter(None, iterable) if discard_falsy else iterable)
 
 
-def iter_files(paths:list[os.PathLike], yield_dirs=False) -> abc.Iterator[pathlib.Path]:
+def iter_files(paths:abc.Iterable[os.PathLike], yield_dirs=False) -> abc.Iterator[pathlib.Path]:
     for item in paths:
         path = pathlib.Path(item)
         if path.is_file():
@@ -137,8 +137,9 @@ def iter_files(paths:list[os.PathLike], yield_dirs=False) -> abc.Iterator[pathli
                     yield dirpath / filename
 
 
-def csv2iter[T](text:str, sep=",", itemtype:type[T]=str) ->  abc.Iterator[T]:
+def csv2iter[T](text:str, sep=",", itemtype:abc.Callable[[str], T]=str) ->  abc.Iterator[T]:
     """Split text by separator, yielding each stripped (and possibly converted) element"""
+    # For mypy error, see https://github.com/python/mypy/issues/3737
     return (itemtype(_.strip()) for _ in (text.split(sep) if text else []))
 
 
@@ -163,6 +164,14 @@ class ScraperError(Exception):
         super().__init__((str(msg) % args) if args else msg)
         self.errno: int = errno
         self.err: Exception | None = err
+
+
+class ScraperResponseError(ScraperError):
+    def __init__(self, msg: object = "", *args: object, err: requests.RequestException):
+        super().__init__(msg, *args)
+        self.err: requests.RequestException = err
+        assert self.err.response is not None
+        self.errno: int = self.err.response.status_code
 
 
 class CachedResource:
@@ -198,7 +207,7 @@ class CachedResource:
     def is_json(self) -> bool:
         return self.type == "json"
 
-    def read(self) -> object | None:
+    def read(self) -> Json | str | bytes | None:
         if (path := self.path) is None:
             return None
         try:
@@ -208,7 +217,7 @@ class CachedResource:
         log.debug("Data retrieved from cache: %s", path)
         return json.loads(data) if self.is_json else data
 
-    def write(self, data:object) -> None:
+    def write(self, data:str|bytes) -> None:
         if (path := self.path) is None:
             return
         log.debug("Write data to cache: %s", path)
@@ -255,19 +264,20 @@ class System:
     # For now, exclusive to ScreenScraper
 
     def __init__(self, data:JsonDict):
-        self._data: JsonDict = data
+        self.data: JsonDict = data
         self.id: int = int(data["id"])
         self.name: str = data["noms"]["nom_eu"]  # the only "nom_*" surely present in all systems
+        # FIXME: handle "pc(a|b),dos(c|d)" cases for extensions
         self.suffixes: set[str] = set(f".{_}" for _ in csv2iter(data.get("extensions")))
         self.manufacturer: str = data.get("compagnie", "")
         self.paths: set[str] = set(
             _.lower() for _ in
             set(itertools.chain.from_iterable(csv2iter(_) for _ in data["noms"].values()))
         )
-        self.names: tuple[str] = tuple(unique(data["noms"].get(f"nom_{_}") for _ in ("eu", "us", "jp")))
+        self.names: tuple[str, ...] = tuple(unique(data["noms"].get(f"nom_{_}") for _ in ("eu", "us", "jp")))
 
     def __str__(self):
-        return f"{self.manufacturer} {self.name}"
+        return f"{self.manufacturer} {self.name.removeprefix(self.manufacturer).strip()}"
 
     def __repr__(self):
         names = " / ".join(self.names).removeprefix(self.manufacturer).strip()
@@ -313,7 +323,7 @@ class ScreenScraper:
         self.username = username
         self.password = password
         self.cachedir: pathlib.Path | None = None if cachedir is None else pathlib.Path(cachedir)
-        self._systems: Systems = {}
+        self._systems: ScreenScraper.Systems = {}
         # self._systems: dict[str, System] = {}
 
     @property
@@ -324,13 +334,11 @@ class ScreenScraper:
     def systems(self) -> Systems:
         if self._systems:
             return self._systems
-        for system in self.api_systems_list():
+        for system_data in self.api_systems_list():
+            system = System(system_data)
             # FIXME: handle "x(a|b),y(c|d)" cases
-            system["names"] = set(itertools.chain.from_iterable(csv2iter(_) for _ in system["noms"].values()))
-            system["dirnames"] = set(_.lower() for _ in system["names"])
-            system["suffixes"] = set(f".{_}" for _ in csv2iter(system.get("extensions")))
-            self._systems[int(system["id"])] = system
-            log.debug("System %3d: %s, %s", system["id"], system["dirnames"], system["suffixes"])
+            self._systems[system.id] = system
+            log.debug("%r: %s, %s", system, system.paths, system.suffixes)
         return self._systems
 
     def __str__(self):
@@ -361,21 +369,24 @@ class ScreenScraper:
             "output": "json",  # default: "xml"
         }
         data.update(params)
+        res: requests.Response
         try:
             res = requests.get(url, params=data, timeout=self.TIMEOUT)
-            res.raise_for_status()
-            out = res.json()
         except requests.exceptions.ReadTimeout as e:
             raise ScraperError("%s", e, err=e)
-        except requests.exceptions.JSONDecodeError as e:
+        try:
+            res.raise_for_status()
+            out = res.json()
+        except requests.JSONDecodeError as e:
             raise ScraperError("Malformed JSON: %s from url: %s\n%r", e, res.url, res.text, err=e)
-        except requests.exceptions.RequestException as e:
+        except requests.RequestException as e:
+            assert e.response is not None
             # requests error message already contains URL
-            if res.status_code in { 403 }:  # Forbidden
+            if e.response.status_code in { 403 }:  # Forbidden
                 msg = res.text.strip()
                 if "identifiants développeur" in msg:  # "Erreur de login : Vérifier vos identifiants développeur !  "
-                    raise ScraperError("%s\t%s (Invalid developer credentials)", e, msg, errno=403, err=e)
-            raise ScraperError("%s\n%s\n%s", e, pretty(dict(res.headers)), res.text, errno=res.status_code, err=e)
+                    raise ScraperResponseError("%s\t%s (Invalid developer credentials)", e, msg, err=e)
+            raise ScraperResponseError("%s\n%s\n%s", e, pretty(dict(e.response.headers)), e.response.text, err=e)
         # Write to cache
         cache.write(out)
         return out["response"]
@@ -411,27 +422,26 @@ class ScreenScraper:
     # High-level methods --------------------------------------------------
 
     def find_system_by_dir(self, path:os.PathLike) -> System | None:
-        # TODO: Make it recusive on parents, so it find systems for roms in subdirs
+        # TODO: Make it recursive on parents, so it find systems for roms in subdirs
         if (path := pathlib.Path(path)).is_file():
             path = path.parent
-        dirname = path.name
-        for data in self.systems.values():
-            if dirname.lower() in data["dirnames"]:
-                return System(data)
+        dirname: str = path.name
+        for system in self.systems.values():
+            if dirname.lower() in system.paths:
+                return system
         return None
         # raise ScraperError("System not found in %s database for directory: %s", self.source, dirname)
 
     def find_game(self, system:System, rom:Rom) -> JsonDict:
         try:
             info = self.api_game_info(system.id, rom.name, rom.size, rom.crc32)
-        except ScraperError as e:
+        except ScraperResponseError as e:
             if e.errno in { 404 }:  # Not Found
                 msg = e.err.response.text.strip()
-                pretty_system = (system["id"], system["noms"]["nom_eu"])
                 if "non trouvée" in msg:  # "Erreur : Rom/Iso/Dossier non trouvée !  "
                     raise ScraperError(
-                        "%r for system %r not found in %s database.",
-                        rom, system["noms"]["nom_eu"], self.source, err=e.err
+                        "%r for %r not found in %s database.",
+                        rom, system, self.source, err=e.err
                     )
             raise
         return info
@@ -482,7 +492,7 @@ class ScreenScraper:
                 log.warning("Ignoring non-ROM file for %r: %s", system, path)
             num_rom += 1
             try:
-                num_media += 1 if self.download_rom_media(system, Rom(path), save_path, media_type) else 0
+                num_media += 1 if self.download_rom_media(system, Rom(path), pathlib.Path(save_path), media_type) else 0
             except ScraperError as e:
                 log.error(e)
                 continue
@@ -516,9 +526,9 @@ class ScreenScraper:
             for system in systems:
                 if not criteria(system):
                     i += 1
-                    log.debug("Missing %s: %3d - %s", label, system["id"], system["names"])
+                    log.debug("Missing %s: %r", label, system)
             log.info("%3d missing %s", i, label)
-        noms = itertools.chain.from_iterable(_["noms"].keys() for _ in systems)
+        noms = itertools.chain.from_iterable(_.data["noms"].keys() for _ in systems)
         log.info("Names: %s", set(_.removeprefix("nom_") for _ in noms))
 
 
